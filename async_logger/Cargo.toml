@@ -1,0 +1,9 @@
+[package]
+name = "async_logger"
+version = "0.1.1"
+edition = "2024"
+
+[dependencies]
+chrono = "0.4.45"
+log = "0.4.33"
+tokio = { version = "1", features = ["full"] }

@@ -1,0 +1,112 @@
+2026.7.8
+1. 开始构思
+	> 采用 axum 框架
+	> 浏览文本,图片,播放视频等 html 代码采用模板机制,从外部读取,不要硬编码在 rs 代码中
+
+2. axum 相关
+	> 除了 /, /shutdown 等内置操作之外,其他路由都是动态的
+	> axum 的通用路由函数 fallback 机制
+	> 添加日志中间层
+	> axum-range 添加 Range 支持,播放长视频
+	> 可配置为禁用 /shutdown,响应 ctrl_c + sig_term 退出
+
+3. regex 相关,文本,图片,视频通过配置中的 pattern 指定
+
+4. html 相关
+	> 预览文本文件 <iframe> 或者直接返回文本文件
+	> 预览图片 <img> 自适应
+	> 播放视频 <video> 标签
+
+5. 如何实现批量上传/下载? 比如共享照片,用户可能希望一次性下载全部照片
+	> server 端打包为 zip
+	> 客户端 js 代码依次下载?
+	> 专门的 python 脚本批量上传/下载工具?
+		> 最好不要打破客户端只使用浏览器的原则
+
+6. 读取 json 配置
+	> conf_json
+	> hjson
+	> 用 toml?
+
+2026.7.21
+1. ls 布局
+<last modify> <size> <filename>
+
+2026.7.22
+1. 实现 206, 看样子 FileStream 只是实现了功能,但需要手动添加 206 支持
+
+2026.7.23
+1. 浏览部分完成
+2. 实现目录可写属性配置和 POST 上传
+	> 根据上传文件名重建目录树,这样就解决了在服务器建目录的问题,类似 SFTP,无需单独提供新建目录的接口
+	> 重名处理策略
+		> 生成 unique 名 UUID 或者 DATETIME + RAND
+		> 覆盖,既然可写,可删除,表明内容就是变动的,直接覆盖合乎逻辑
+		> 配置为可选?
+	> 写入并发问题
+		> 写入锁? 系统瓶颈,但写入请求比较少,似乎问题不大
+		> 直接在目标文件夹生成 xxx.uuid.tmp 临时文件,接收完毕后,锁保护重命名
+		> 统一在配置文件指定的临时文件夹内比较好
+3. 实现删除接口,同样由配置权限控制
+	> 既然上传能覆盖,则没必要单独设置删除权限,能写就能删即可
+	> 还是要单独的删除接口,因为有不同的重名处理策略
+	> 前端页面通过 js 发送 DELETE method, 不要用 GET + Query 的方式
+4. 实现缩略图
+	> 必须要可关闭
+
+2026.7.25
+1. 缩略图实现方案
+	> 原始文件添加 ?thumb=true 表示读取对应的缩略图
+		> thumb?img=... 的方式需要再次检测文件是否允许访问,逻辑重复,不好
+		> 所有访问文件系统的请求(除了 / 和 /shutdown) 都首先经过 fallback()
+	> thumb 存储在 thumb_root/<img_path>.thumb.png
+	> thumb_root 自动添加到 root_paths 中并设置 hide = true
+		> 还是依赖用户手动配置?
+		> 不对,反而不能把 thumb_root 暴露
+		> 浏览器只能通过 ?thumb=true 读取,服务器跳转到真正的文件,才能保证不会文件竞争
+	> thumb 全局锁,判断是否存在,生成都在锁内操作
+	> thumb semaphore 全局并发控制信号量,最多只允许 10 个 thumb 生成任务同时进行
+	> 生成逻辑
+		> 进入 thumb_lock
+		> thumb 文件是否存在,yes 则跳转到 thumb 文件 url
+		> 不存在,检查 thumb_map 对应原始文件path key 是否存在,
+			> yes 则加入等待队列, 退出 thumb_lock, 等待队列通知
+			> no 则创建等待队列 broadcast channel, 并加入此等待队列成为第一个等待着,退出 thumb_lock, 等待 thumb_sem 许可,启动生成 tokio::spawn_blocking
+		> 生成任务完成后( thumb_sem 自动被释放),进入 thumb_lock, thumb 写磁盘, signal broadcast channel, 移除 thumb_map 记录
+		> 等待队列中的所有请求醒来, 返回 Redirect to thumb file
+	> 问题: 多一次客户端跳转
+		> 实现服务端直接跳转
+	> 删除文件和文件夹时要删除对应的缩略图
+		> v0.5.0
+	> 页面上删除时,操控 DOM 而非刷新整个页面
+		> v0.5.1
+2. ls.html 添加 <up> 访问上一级目录链接
+	> v0.5.2
+3. rwx 权限如何体现在页面上?
+	> +--/++-/+++ 可以对齐,但意思不够直白
+	> r--/rw-/rwx 直白,但不能对齐
+	> 主页不显示 last_modify,正好用此字段表述权限
+	> v0.5.3
+4. get_thumb_file 服务器跳转到 get_file,复用 etag 的响应头生成逻辑
+	> no
+5. clap 处理命令行参数
+	> v0.6.0
+
+2026.7.27
+1. 规划默认配置目录结构
+	v0.6.1
+2. 允许关闭 /shutdown 
+	> 保留路由函数
+	> 移除模板中的链接
+	> tokio::select ctrl_c + cancel_token 捕获 ctrl_c 信号优雅退出
+	v0.6.2
+
+2026.7.28
+1. 添加 Audios 分类
+	> v0.6.3
+
+2026.7.29
+1. 列表按照文件名排序
+	> v0.6.4
+2. 处理 IF_NONE_MATCH & IF_MODIFIED_SINCE 利用浏览器缓存
+	> v0.6.5
