@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+    <head>
+        <meta charset="utf-8" />
+        <title>{{APP_NAME}} - {{TITLE}}</title>
+        {% if thumb_enabled %}
+        {% raw %}
+            <style>
+                .image-container {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 16px;
+                }
+
+                .image-container img {
+                    flex: 0 1 auto;
+                    min-width: 0;
+                    max-width: 100%;
+                    height: auto;
+                    object-fit: cover;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+                    transition: transform 0.2s ease;
+                }
+
+                .image-container img:hover {
+                    transform: translateY(-4px);
+                    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+                }
+
+                .image-wrapper-box {
+                    position: relative;
+                    display: inline-block;
+                }
+
+                .delete-btn {
+                    position: absolute;
+                    top: 8px;
+                    right: 8px;
+                    width: 28px;
+                    height: 28px;
+                    padding: 0;
+                    background: rgba(0, 0, 0, 0.6);
+                    color: #fff;
+                    border: none;
+                    border-radius: 50%;
+                    font-size: 16px;
+                    line-height: 28px;
+                    text-align: center;
+                    cursor: pointer;
+                    opacity: 0;
+                    transition: opacity 0.2s ease, background 0.2s ease;
+                    z-index: 10;
+                }
+
+                .image-wrapper-box:hover .delete-btn {
+                    opacity: 1;
+                }
+
+                .delete-btn:hover {
+                    background: rgba(220, 53, 69, 0.9);
+                }
+            </style>
+        {% endraw %}
+        {% endif %}
+    </head>
+    <body>
+        {{APP_NAME}} v{{VERSION}}
+        <hr />
+        {% if writable %}
+            <form action="." method="post" enctype="multipart/form-data">
+                <label for="file">Select file: </label>
+                <input type="file" id="file" name="file" multiple />
+                <label for="file">Select folder: </label>
+                <input type="file" id="folder", name="folder" webkitdirectory multiple />
+                <button type="submit">Upload</button>
+            </form>
+        {% endif %}
+        {% if dirs %}
+            <h3>DIRS</h3>
+            {% for entry in dirs %}
+                <div class="item-wrapper-box">
+                {% if deletable %}
+                    <button data-url="{{ entry.url }}" data-name="{{ entry.name }}" data-confirm="{{ confirm_delete }}" onclick="handleDelete(this)">x</button> | 
+                {% endif %}
+                <span>{{ entry.last_modified }}</span> | <span>{{ entry.size }}</span> | <a href="{{ entry.url }}"> {{ entry.name }}</a>
+                <br />
+                </div>
+            {% endfor %}
+        {% endif %}
+        {% if texts %}
+            <h3>Texts</h3>
+            {% for entry in texts %}
+                <div class="item-wrapper-box">
+                {% if deletable %}
+                    <button data-url="{{ entry.url }}" data-name="{{ entry.name }}" data-confirm="{{ confirm_delete }}" onclick="handleDelete(this)">x</button> | 
+                {% endif %}
+                <span>{{ entry.last_modified }}</span> | <span>{{ entry.size }}</span> | <a href="{{ entry.url }}"> {{ entry.name }}</a><br />
+                </div>
+            {% endfor %}
+        {% endif %}
+        {% if images %}
+            <h3>Images</h3>
+            {% if thumb_enabled %}
+                <div class="image-container">
+                {% for entry in images %}
+                    <div class="image-wrapper-box">
+                        {% if deletable %}
+                            <button type="button" class="delete-btn" data-url="{{ entry.url }}" data-name="{{ entry.name }}" data-confirm="{{ confirm_delete }}" onclick="handleDelete(this)">x</button>
+                        {% endif %}
+                        <a href="{{ entry.url }}">
+                            <img src="{{ entry.url }}?thumb=true" alt="{{ entry.name }}" loading="lazy" />
+                        </a>
+                    </div>
+                {% endfor %}
+                </div>
+            {% else %}
+                {% for entry in images %}
+                    <div class="item-wrapper-box">
+                    {% if deletable %}
+                        <button data-url="{{ entry.url }}" data-name="{{ entry.name }}" data-confirm="{{ confirm_delete }}" onclick="handleDelete(this)">x</button> | 
+                    {% endif %}
+                    <span>{{ entry.last_modified }}</span> | <span>{{ entry.size }}</span> | <a href="{{ entry.url }}"> {{ entry.name }}</a><br />
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endif %}
+        {% if audios %}
+            <h3>Audios</h3>
+            {% for entry in audios %}
+                <div class="item-wrapper-box">
+                {% if deletable %}
+                    <button data-url="{{ entry.url }}" data-name="{{ entry.name }}" data-confirm="{{ confirm_delete }}" onclick="handleDelete(this)">x</button> | 
+                {% endif %}
+                <span>{{ entry.last_modified }}</span> | <span>{{ entry.size }}</span> | <a href="{{ entry.url }}"> {{ entry.name }}</a><br />
+                </div>
+            {% endfor %}
+        {% endif %}
+        {% if videos %}
+            <h3>Videos</h3>
+            {% for entry in videos %}
+                <div class="item-wrapper-box">
+                {% if deletable %}
+                    <button data-url="{{ entry.url }}" data-name="{{ entry.name }}" data-confirm="{{ confirm_delete }}" onclick="handleDelete(this)">x</button> | 
+                {% endif %}
+                <span>{{ entry.last_modified }}</span> | <span>{{ entry.size }}</span> | <a href="{{ entry.url }}"> {{ entry.name }}</a><br />
+                </div>
+            {% endfor %}
+        {% endif %}
+        {% if others %}
+            <h3>Others</h3>
+            {% for entry in others %}
+                <div class="item-wrapper-box">
+                {% if deletable %}
+                    <button data-url="{{ entry.url }}" data-name="{{ entry.name }}" data-confirm="{{ confirm_delete }}" onclick="handleDelete(this)">x</button> | 
+                {% endif %}
+                <span>{{ entry.last_modified }}</span> | <span>{{ entry.size }}</span> | <a href="{{ entry.url }}"> {{ entry.name }}</a><br />
+                </div>
+            {% endfor %}
+        {% endif %}
+        <hr />
+        <a href="/">Home</a> | <a href="{{ up }}">Up</a> | by {{AUTHOR}}
+        {% if deletable %}
+        {% raw %}
+            <script>
+                async function handleDelete(button) {
+                    const resourceUrl = button.dataset.url;
+                    const resourceName = button.dataset.name;
+                    const resourceConfirm = button.dataset.confirm === 'true';
+                    if (resourceConfirm) {
+                        if (!confirm(`confirm to delete: ${resourceName}`)) return;
+                    }
+                    try {
+                        const response = await fetch(resourceUrl, { method: "DELETE" });
+                        if (response.ok) {
+                            button.closest('.image-wrapper-box, .item-wrapper-box').remove();
+                        } else {
+                        }
+                    } catch (error) {
+                    }
+                }
+            </script>
+        {% endraw %}
+        {% endif %}
+    </body>
+</html>

@@ -1,0 +1,90 @@
+# config for LwNAS project
+
+# TCP 地址和端口
+addr = "0.0.0.0:80"
+
+# 外观模板加载目录
+templates = "templates/**/*.html"
+
+# 是否允许通过页面关闭程序,否则只能在服务器端 ctrl+c 结束进程
+shutdown_enabled = false
+
+# 是否开启缩略图功能
+thumb_enabled = true
+
+# 缩略图存储目录
+thumb_root = 'thumbs'
+
+# 缩略图大小 px
+thumb_size = 200
+
+# 缩略图并发生成任务数量,防止占用大量线程
+thumb_max_parallel = 4
+
+# 临时上传文件存储目录
+tmp_file_dir = 'tmp'
+
+# 上传文件重名时的处理策略
+# overwrite,
+# skip,
+# appenduuid,
+# appendtimestamp,
+file_name_conflict_resolution_strategy = "appendtimestamp"
+
+# 最大上传文件的字节数限制 (2G)
+max_upload_limit = 2_147_483_648
+
+# 是否弹出删除确认
+confirm_delete = true
+
+# 日志相关设置
+[logger]
+
+# 异步日志队列容量,根据服务器负载设置一个经验数值, 8192 足以应付绝大多数情况
+bound = 8192
+
+# 日志级别,从高到低: ERROR, WARN, INFO, DEBUG, TRACE, 日志级别越高输出的内容越少
+level = "DEBUG"
+
+# 日志流是否输出到 STDOUT
+stdout = true
+
+# 日志流是否输出到 STDERR
+stderr = false
+
+# 日志流是否输出到循环文件 rf_file_name 设置为空 '' 表示禁用循环文件
+rf_file_name = 'logs/lwnas.log'
+
+# 循环文件个数
+rf_file_count = 3
+
+# 单个循环文件大小 (5MB)
+rf_file_size = 5_242_880
+
+# 目录映射
+[[root_paths]]
+
+# 文件路径
+local_path = 'root/LwNAS.ico'
+
+# URI 路径
+uri_path = "/favicon.ico"
+
+# 希望浏览器可以访问,但不出现在主页上,设置 hide = true
+hide = true
+
+# 目录映射
+[[root_paths]]
+local_path = 'root/LwNAS.png'
+uri_path = "/logo.png"
+
+# 目录映射
+[[root_paths]]
+local_path = 'root/var'
+uri_path = "/var/"
+
+# 可写则允许用户上传文件到此目录,其子目录也会继承可写权限
+writable = true
+
+# 可写的前提下,进一步控制是否可删除
+deletable = true

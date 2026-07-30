@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+    <head>
+        <meta charset="utf-8" />
+        <title>{{APP_NAME}} - {{TITLE}}</title>
+    </head>
+    <body>
+        Welcome to {{APP_NAME}} v{{VERSION}}
+        <hr />
+        {% for entry in entries %}
+            <span>{{ entry.permission }} | </span><span>{{ entry.entry.last_modified }}</span> | <span>{{ entry.entry.size }}</span> | <a href="{{ entry.entry.url }}"> {{ entry.entry.name }}</a><br />
+        {% endfor %}
+        <hr />
+        {% if shutdown_enabled %}
+            <a href="/shutdown">Shutdown</a> | 
+        {% endif %}
+        powered by {{AUTHOR}}
+    </body>
+</html>
