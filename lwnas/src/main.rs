@@ -1,7 +1,3 @@
-//! 基本 Axum 应用框架
-//! "/" 显示操作接口
-//! "/xxx" 公共 API
-//!
 use crate::config::FileNameConflictResolutionStrategy;
 use async_logger;
 use axum::{
@@ -84,13 +80,12 @@ async fn main() {
 
     info!("Welcome to {} v{} by {}", APP_NAME, VERSION, AUTHOR);
 
-    // 启动 httpd
-    let listener = tokio::net::TcpListener::bind(&conf.addr).await.unwrap();
-    info!("httpd runing on: {} ...", &conf.addr);
-
     // 创建共享状态
     let mut templates = Tera::default();
-    templates.load_from_glob(&conf.templates).unwrap();
+    templates.load_from_glob(&conf.templates).expect(&format!(
+        "failed to load Tera templates from \"{}\"",
+        conf.templates
+    ));
 
     let token = CancellationToken::new();
     let app_state = Arc::new(AppState {
@@ -101,6 +96,12 @@ async fn main() {
         thumbs_max_parallel_sem: Arc::new(Semaphore::new(conf.thumb_max_parallel as usize)),
         conf: conf,
     });
+
+    // 启动 httpd
+    let listener = tokio::net::TcpListener::bind(&app_state.conf.addr)
+        .await
+        .expect(&format!("tcp address {} unavailable", app_state.conf.addr));
+    info!("httpd runing on: {} ...", app_state.conf.addr);
 
     // 创建路由表,添加固定路由
     let app = Router::new()
@@ -122,7 +123,7 @@ async fn main() {
             }
         })
         .await
-        .unwrap();
+        .expect("failed to start axum server");
 
     info!("httpd stopped");
     info!("Bye");
@@ -252,11 +253,8 @@ async fn fallback(State(app_state): State<Arc<AppState>>, request: Request<Body>
     let headers = request.headers();
 
     // url 解码
-    let path = match utils::decode_uri(uri.path()) {
-        Some(v) => v.to_string(),
-        _ => {
-            return (StatusCode::BAD_REQUEST, format!("url decode error")).into_response();
-        }
+    let Ok(path) = utils::decode_uri(uri.path()) else {
+        return (StatusCode::BAD_REQUEST, format!("url decode error")).into_response();
     };
 
     // 规范化 uri,移除 ../ ./
@@ -386,19 +384,21 @@ async fn fallback_to_file_get<P: AsRef<Path> + Copy>(
     // 处理请求头中 Range 字段,实现断点续传
     let res = {
         if let Some(range) = headers.get(header::RANGE) {
-            if let Ok((range_start, range_end)) =
-                utils::parse_range(range.to_str().unwrap(), attr.len())
-            {
-                // 构建 206 响应
-                match FileStream::<ReaderStream<File>>::try_range_response(
-                    local_path,
-                    range_start,
-                    range_end,
-                )
-                .await
-                {
-                    Ok(response) => response,
-                    _ => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            if let Ok(range) = range.to_str() {
+                if let Ok((range_start, range_end)) = utils::parse_range(range, attr.len()) {
+                    // 构建 206 响应
+                    match FileStream::<ReaderStream<File>>::try_range_response(
+                        local_path,
+                        range_start,
+                        range_end,
+                    )
+                    .await
+                    {
+                        Ok(response) => response,
+                        _ => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                    }
+                } else {
+                    return StatusCode::BAD_REQUEST.into_response();
                 }
             } else {
                 return StatusCode::BAD_REQUEST.into_response();
@@ -427,6 +427,7 @@ async fn fallback_to_file_get<P: AsRef<Path> + Copy>(
         header::HeaderValue::from_static("bytes"),
     );
 
+    // to_rfc2822 and lock unwrap should be fine
     if let Some(modified) = modified.as_ref() {
         res_headers.insert(
             header::LAST_MODIFIED,
@@ -477,49 +478,86 @@ async fn fallback_to_dir_get<P: AsRef<Path> + Copy>(
     let mut others = texts.clone();
     let mut dirs = texts.clone();
 
-    let mut entries = tokio::fs::read_dir(&local_path).await.unwrap();
-    while let Some(entry) = entries.next_entry().await.unwrap() {
-        if let Some(x) = entry.file_name().to_str() {
-            let mut name = x.to_string();
-            let mut size = String::new();
-            let mut last_modified = String::new();
-            let mut url = utils::encode_uri(path) + &utils::encode_uri(&name);
-
-            let metadata = entry.metadata().await.unwrap();
-            let ls = if metadata.is_dir() {
-                name.push_str("/");
-                size.push_str("<DIR>");
-                url.push_str("/");
-                &mut dirs
-            } else {
-                size = utils::fmt_human_size(metadata.len());
-
-                let content_type = utils::guess_mime_type(&name);
-                if utils::is_text(&content_type) || utils::is_pdf(&content_type) {
-                    &mut texts
-                } else if utils::is_image(&content_type) {
-                    &mut images
-                } else if utils::is_audio(&content_type) {
-                    &mut audios
-                } else if utils::is_video(&content_type) {
-                    &mut videos
-                } else {
-                    &mut others
-                }
-            };
-
-            if let Ok(modified) = metadata.modified() {
-                let dt: DateTime<Utc> = modified.into();
-                last_modified = dt.format("%Y-%m-%d %H:%M:%S UTC").to_string();
-            }
-
-            ls.push(utils::FileEntryDesc {
-                name: name,
-                size: size,
-                last_modified: last_modified,
-                url: url,
-            });
+    let mut entries = match tokio::fs::read_dir(&local_path).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(
+                "faild to read dir \"{}\", {}",
+                local_path.as_ref().display(),
+                e
+            );
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
+    };
+
+    loop {
+        let Some(entry) = (match entries.next_entry().await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    "failed to read next entry of dir \"{}\", {}",
+                    local_path.as_ref().display(),
+                    e
+                );
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        }) else {
+            break;
+        };
+
+        let metadata = match entry.metadata().await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("failed to read metadata, {}", e);
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+
+        // 文件/子目录名需要出现在页面和 URL 中,不能接受 to_string_lossy
+        let Ok(mut name) = entry.file_name().into_string() else {
+            warn!(
+                "failed to convert \"{}\" to utf-8 string, ignored",
+                entry.file_name().display()
+            );
+            continue;
+        };
+        let mut size = String::new();
+        let mut last_modified = String::new();
+        let mut url = utils::encode_uri(path) + &utils::encode_uri(&name);
+
+        let ls = if metadata.is_dir() {
+            name.push_str("/");
+            size.push_str("<DIR>");
+            url.push_str("/");
+            &mut dirs
+        } else {
+            size = utils::fmt_human_size(metadata.len());
+
+            let content_type = utils::guess_mime_type(&name);
+            if utils::is_text(&content_type) || utils::is_pdf(&content_type) {
+                &mut texts
+            } else if utils::is_image(&content_type) {
+                &mut images
+            } else if utils::is_audio(&content_type) {
+                &mut audios
+            } else if utils::is_video(&content_type) {
+                &mut videos
+            } else {
+                &mut others
+            }
+        };
+
+        if let Ok(modified) = metadata.modified() {
+            let dt: DateTime<Utc> = modified.into();
+            last_modified = dt.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+        }
+
+        ls.push(utils::FileEntryDesc {
+            name: name,
+            size: size,
+            last_modified: last_modified,
+            url: url,
+        });
     }
 
     // 按文件名排序

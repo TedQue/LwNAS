@@ -1,10 +1,9 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use chrono::Local;
 use image::{DynamicImage, ImageFormat};
 use mime_guess;
 use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
 use std::fs::Metadata;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -63,8 +62,11 @@ pub fn encode_uri(path: &str) -> String {
     utf8_percent_encode(path, URI_PATH_SET).to_string()
 }
 
-pub fn decode_uri(path: &str) -> Option<Cow<'_, str>> {
-    percent_decode_str(path).decode_utf8().ok()
+pub fn decode_uri(path: &str) -> Result<String> {
+    let decoded = percent_decode_str(path)
+        .decode_utf8()
+        .with_context(|| format!("failed to decode uri: {}", path))?;
+    Ok(decoded.to_string())
 }
 
 // 类似 normalize_path 解析并移除 uri 中的 ./ ../
