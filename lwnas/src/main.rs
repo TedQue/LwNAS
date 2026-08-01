@@ -427,7 +427,7 @@ async fn fallback_to_file_get<P: AsRef<Path> + Copy>(
         header::HeaderValue::from_static("bytes"),
     );
 
-    // to_rfc2822 and lock unwrap should be fine
+    // to_rfc2822 should be fine
     if let Some(modified) = modified.as_ref() {
         res_headers.insert(
             header::LAST_MODIFIED,
@@ -435,6 +435,7 @@ async fn fallback_to_file_get<P: AsRef<Path> + Copy>(
         );
     }
 
+    // header parse should be fine
     res_headers.insert(header::ETAG, etag.parse().unwrap());
 
     // 推断 Content-Type
@@ -491,7 +492,7 @@ async fn fallback_to_dir_get<P: AsRef<Path> + Copy>(
     };
 
     loop {
-        let Some(entry) = (match entries.next_entry().await {
+        let entry = match entries.next_entry().await {
             Ok(v) => v,
             Err(e) => {
                 warn!(
@@ -501,7 +502,9 @@ async fn fallback_to_dir_get<P: AsRef<Path> + Copy>(
                 );
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
-        }) else {
+        }; 
+
+        let Some(entry) = entry else {
             break;
         };
 
@@ -612,6 +615,7 @@ async fn fallback_to_dir_upload<P: AsRef<Path> + Copy>(
             debug!("bad multipart data");
             return StatusCode::BAD_REQUEST.into_response();
         };
+
         let Some(mut field) = field else {
             // 数据序列完结
             break;
@@ -668,6 +672,8 @@ async fn fallback_to_dir_upload<P: AsRef<Path> + Copy>(
         // *锁内执行* (只能使用 std::fs 接口)
         {
             let mut target_path = local_path.as_ref().to_path_buf();
+
+            // lock unwrap should be fine
             let _lock = app_state.fs_lock.lock().unwrap();
 
             // 如果原始文件名中含有目录(上传文件夹),则创建目录树
