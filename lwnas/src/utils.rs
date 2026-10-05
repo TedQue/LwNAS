@@ -20,6 +20,9 @@ pub struct FileEntryDesc {
     pub size: String,
     pub last_modified: String,
     pub url: String,
+    pub url_video_play: String,
+    pub url_video_convert: String,
+    pub url_video_convert_status: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -106,6 +109,14 @@ pub fn normalize_uri_path(uri: &str) -> Result<String> {
         }
     }
     Ok(result)
+}
+
+pub fn path_join_uri<P: AsRef<Path>>(base: P, uri: &str) -> PathBuf {
+    let mut p = PathBuf::from(base.as_ref());
+    for i in uri.split('/').filter(|s| !s.is_empty()) {
+        p.push(i);
+    }
+    p
 }
 
 pub fn get_up_uri_path(path: &str) -> &str {
@@ -289,6 +300,16 @@ fn parse_single_range(range: &str, total_size: u64) -> Result<(u64, u64)> {
     } else {
         Ok((s, e))
     }
+}
+
+pub fn mv<P: AsRef<Path>>(from: P, to: P) -> Result<()> {
+    // 移动文件: 先尝试 rename,如果失败(from and to are on separate filesystems)
+    // 则尝试 copy + rm
+    if std::fs::rename(&from, &to).is_err() {
+        std::fs::copy(&from, &to)?;
+        std::fs::remove_file(&from)?;
+    }
+    Ok(())
 }
 
 pub fn generate_thumbnail<P: AsRef<Path>>(path: P, max_size: u32) -> Result<Vec<u8>> {

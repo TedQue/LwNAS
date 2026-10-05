@@ -13,6 +13,7 @@ use axum_extra::response::file_stream::FileStream;
 use chrono::{DateTime, Utc};
 use clap::Parser;
 use log::*;
+use shell_words;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -21,8 +22,9 @@ use tera::{Context, Tera};
 use tokio::{
     fs::File,
     io::AsyncWriteExt,
-    signal,
+    process, signal,
     sync::{Semaphore, broadcast},
+    time::{Duration, sleep},
 };
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
 
@@ -35,6 +37,7 @@ const AUTHOR: &str = "Que's Software";
 const SERVER: &str = constcat::concat!(APP_NAME, "/v", VERSION);
 
 type ThumbsWaitingMap = HashMap<String, broadcast::Sender<bool>>;
+type VideoConvertTaskMap = HashMap<String, (tokio::task::JoinHandle<()>, CancellationToken)>;
 
 struct AppState {
     conf: config::Config,
@@ -46,6 +49,8 @@ struct AppState {
     // 缩略图文件全局锁,判断缩略图是否存在,写入都必须在锁内完成
     thumbs_lock: Mutex<ThumbsWaitingMap>,
     thumbs_max_parallel_sem: Arc<Semaphore>,
+    // 视频转码,记录当前正在执行的转码任务
+    video_convert_lock: Mutex<VideoConvertTaskMap>,
 }
 
 #[derive(Parser, Debug)]
@@ -94,8 +99,10 @@ async fn main() {
         fs_lock: Mutex::new(()),
         thumbs_lock: Mutex::new(ThumbsWaitingMap::new()),
         thumbs_max_parallel_sem: Arc::new(Semaphore::new(conf.thumb_max_parallel as usize)),
+        video_convert_lock: Mutex::new(VideoConvertTaskMap::new()),
         conf: conf,
     });
+    let app_state_for_shutdown = app_state.clone();
 
     // 启动 httpd
     let listener = tokio::net::TcpListener::bind(&app_state.conf.addr)
@@ -120,6 +127,27 @@ async fn main() {
             tokio::select! {
                 _ = token.cancelled() => {},
                 r = signal::ctrl_c() => { r.expect("tokio::signal_ctrl_c failed") },
+            }
+
+            // 等待转码任务结束
+            if app_state_for_shutdown.conf.video_convert_enabled {
+                // 锁内发送取消通知
+                let task_join_handles: Vec<_> = {
+                    let mut tasks = app_state_for_shutdown.video_convert_lock.lock().unwrap();
+                    tasks
+                        .drain()
+                        .map(|(video_path, (handle, token))| {
+                            token.cancel();
+                            (video_path, handle)
+                        })
+                        .collect()
+                };
+
+                // 锁外等待转码任务结束
+                for (video_path, handle) in task_join_handles {
+                    let _ = handle.await;
+                    debug!("video convertion task \"{}\" cancelled", video_path);
+                }
             }
         })
         .await
@@ -202,6 +230,9 @@ async fn root(State(app_state): State<Arc<AppState>>) -> Response {
                     size: size,
                     last_modified: last_modified,
                     url: utils::encode_uri(&i.uri_path),
+                    url_video_play: String::new(),
+                    url_video_convert: String::new(),
+                    url_video_convert_status: String::new(),
                 },
                 permission: utils::fmt_permission(writable, deletable),
             });
@@ -225,22 +256,49 @@ async fn shutdown(State(app_state): State<Arc<AppState>>) -> Response {
     if !app_state.conf.shutdown_enabled {
         return StatusCode::FORBIDDEN.into_response();
     }
-
     app_state.token.cancel();
 
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONNECTION,
+        header::HeaderValue::from_static("close"),
+    );
+    show_message(app_state, StatusCode::OK, Some(headers), "Bye", "Bye")
+}
+
+fn show_message(
+    app_state: Arc<AppState>,
+    status_code: StatusCode,
+    headers: Option<HeaderMap>,
+    title: &str,
+    message: &str,
+) -> Response {
     let mut context = Context::new();
     context.insert("APP_NAME", APP_NAME);
     context.insert("VERSION", VERSION);
     context.insert("AUTHOR", AUTHOR);
 
-    let header_conn_close = [("Connection", "close")];
-    if let Ok(s) = app_state.templates.render("bye.html", &context) {
-        (StatusCode::OK, header_conn_close, Html(s)).into_response()
+    context.insert(
+        "STATUS",
+        &format!(
+            "{} {}",
+            status_code.as_str(),
+            status_code.canonical_reason().unwrap_or("")
+        ),
+    );
+    context.insert("TITLE", &title);
+    context.insert("MESSAGE", &message);
+
+    if let Ok(s) = app_state.templates.render("message.html", &context) {
+        if headers.is_none() {
+            (status_code, Html(s)).into_response()
+        } else {
+            (status_code, headers.unwrap(), Html(s)).into_response()
+        }
     } else {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            header_conn_close,
-            Html(format!("template \"bye.html\" render error")),
+            Html(format!("template \"message.html\" render error")),
         )
             .into_response()
     }
@@ -276,9 +334,7 @@ async fn fallback(State(app_state): State<Arc<AppState>>, request: Request<Body>
                 .expect("failed to strip prefix");
 
             if !rest.is_empty() {
-                local_path.push(rest);
-                // 不替换路径分隔符在 Windows 也能正常工作,根据 AI 建议,以下无必要
-                // local_path.push(rest.replace('/', std::path::MAIN_SEPARATOR_STR));
+                local_path = utils::path_join_uri(local_path, rest);
             }
 
             debug!("transfer to local \"{}\" ...", local_path.display());
@@ -306,6 +362,31 @@ async fn fallback(State(app_state): State<Arc<AppState>>, request: Request<Body>
 
                         if app_state.conf.thumb_enabled {
                             return fallback_to_image_thumb(app_state, &local_path, &path).await;
+                        } else {
+                            return StatusCode::FORBIDDEN.into_response();
+                        }
+                    } else if uri.query() == Some("video=play") {
+                        let content_type = utils::guess_mime_type(&local_path);
+                        if !utils::is_video(&content_type) {
+                            return (StatusCode::BAD_REQUEST, format!("invalid video file type"))
+                                .into_response();
+                        }
+
+                        if app_state.conf.video_convert_enabled {
+                            return fallback_to_video_play(app_state, &local_path, &path, headers)
+                                .await;
+                        } else {
+                            return fallback_to_file_get(app_state, &local_path, headers).await;
+                        }
+                    } else if uri.query() == Some("video=convert") {
+                        let content_type = utils::guess_mime_type(&local_path);
+                        if !utils::is_video(&content_type) {
+                            return (StatusCode::BAD_REQUEST, format!("invalid video file type"))
+                                .into_response();
+                        }
+
+                        if app_state.conf.video_convert_enabled {
+                            return fallback_to_video_convert(app_state, &local_path, &path).await;
                         } else {
                             return StatusCode::FORBIDDEN.into_response();
                         }
@@ -346,7 +427,7 @@ async fn fallback(State(app_state): State<Arc<AppState>>, request: Request<Body>
     StatusCode::NOT_FOUND.into_response()
 }
 
-async fn fallback_to_file_get<P: AsRef<Path> + Copy>(
+async fn fallback_to_file_get<P: AsRef<Path>>(
     _app_state: Arc<AppState>,
     local_path: P,
     headers: &HeaderMap,
@@ -388,7 +469,7 @@ async fn fallback_to_file_get<P: AsRef<Path> + Copy>(
                 if let Ok((range_start, range_end)) = utils::parse_range(range, attr.len()) {
                     // 构建 206 响应
                     match FileStream::<ReaderStream<File>>::try_range_response(
-                        local_path,
+                        &local_path,
                         range_start,
                         range_end,
                     )
@@ -458,7 +539,7 @@ async fn fallback_to_file_get<P: AsRef<Path> + Copy>(
     (res_headers, res).into_response()
 }
 
-async fn fallback_to_dir_get<P: AsRef<Path> + Copy>(
+async fn fallback_to_dir_get<P: AsRef<Path>>(
     app_state: Arc<AppState>,
     local_path: P,
     path: &str,
@@ -502,7 +583,7 @@ async fn fallback_to_dir_get<P: AsRef<Path> + Copy>(
                 );
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
-        }; 
+        };
 
         let Some(entry) = entry else {
             break;
@@ -527,6 +608,9 @@ async fn fallback_to_dir_get<P: AsRef<Path> + Copy>(
         let mut size = String::new();
         let mut last_modified = String::new();
         let mut url = utils::encode_uri(path) + &utils::encode_uri(&name);
+        let mut url_video_play = String::new();
+        let mut url_video_convert = String::new();
+        let mut url_video_convert_status = String::new();
 
         let ls = if metadata.is_dir() {
             name.push_str("/");
@@ -544,6 +628,25 @@ async fn fallback_to_dir_get<P: AsRef<Path> + Copy>(
             } else if utils::is_audio(&content_type) {
                 &mut audios
             } else if utils::is_video(&content_type) {
+                if app_state.conf.video_convert_enabled {
+                    let video_path = path.to_owned() + &name;
+                    let video_convert_tasks = app_state.video_convert_lock.lock().unwrap();
+                    let converted_video_path = make_converted_video_path(
+                        &app_state.conf.video_convert_root,
+                        &app_state.conf.video_convert_file_type,
+                        &video_path,
+                    );
+                    if converted_video_path.exists() {
+                        url_video_play.push_str(&url);
+                        url_video_play.push_str("?video=play");
+                    } else if video_convert_tasks.get(&video_path).is_none() {
+                        url_video_convert.push_str(&url);
+                        url_video_convert.push_str("?video=convert");
+                    } else {
+                        url_video_convert_status.push_str(&url);
+                        url_video_convert_status.push_str("?video=status");
+                    }
+                }
                 &mut videos
             } else {
                 &mut others
@@ -560,6 +663,9 @@ async fn fallback_to_dir_get<P: AsRef<Path> + Copy>(
             size: size,
             last_modified: last_modified,
             url: url,
+            url_video_play: url_video_play,
+            url_video_convert: url_video_convert,
+            url_video_convert_status: url_video_convert_status,
         });
     }
 
@@ -585,6 +691,10 @@ async fn fallback_to_dir_get<P: AsRef<Path> + Copy>(
     context.insert("thumb_enabled", &app_state.conf.thumb_enabled);
     context.insert("writable", &writable);
     context.insert("deletable", &deletable);
+    context.insert(
+        "video_convert_enabled",
+        &app_state.conf.video_convert_enabled,
+    );
     context.insert("dirs", &dirs);
     context.insert("texts", &texts);
     context.insert("images", &images);
@@ -604,7 +714,7 @@ async fn fallback_to_dir_get<P: AsRef<Path> + Copy>(
     }
 }
 
-async fn fallback_to_dir_upload<P: AsRef<Path> + Copy>(
+async fn fallback_to_dir_upload<P: AsRef<Path>>(
     app_state: Arc<AppState>,
     local_path: P,
     path: &str,
@@ -721,9 +831,9 @@ async fn fallback_to_dir_upload<P: AsRef<Path> + Copy>(
 
             // 重命名临时文件为目标文件,失败或者跳过时移除临时文件
             if let Some(target_path) = resolved_target_path {
-                if let Some(e) = std::fs::rename(&tmp_path, &target_path).err() {
+                if let Some(e) = utils::mv(&tmp_path, &target_path).err() {
                     warn!(
-                        "rename \"{}\" to \"{}\" failed: {}",
+                        "mv \"{}\" to \"{}\" failed: {}",
                         tmp_path.display(),
                         target_path.display(),
                         e
@@ -754,7 +864,7 @@ async fn fallback_to_dir_upload<P: AsRef<Path> + Copy>(
     Redirect::to(&utils::encode_uri(path)).into_response()
 }
 
-async fn fallback_to_file_delete<P: AsRef<Path> + Copy>(
+async fn fallback_to_file_delete<P: AsRef<Path>>(
     app_state: Arc<AppState>,
     local_path: P,
     path: &str,
@@ -793,7 +903,7 @@ async fn fallback_to_file_delete<P: AsRef<Path> + Copy>(
     (StatusCode::OK, path.to_string()).into_response()
 }
 
-async fn fallback_to_dir_delete<P: AsRef<Path> + Copy>(
+async fn fallback_to_dir_delete<P: AsRef<Path>>(
     app_state: Arc<AppState>,
     local_path: P,
     path: &str,
@@ -813,8 +923,7 @@ async fn fallback_to_dir_delete<P: AsRef<Path> + Copy>(
 
     if app_state.conf.thumb_enabled {
         // 删除对应的 thumb 文件夹(可能不存在)
-        let thumb_path =
-            PathBuf::from(&app_state.conf.thumb_root).join(path.strip_prefix("/").unwrap_or(path));
+        let thumb_path = utils::path_join_uri(&app_state.conf.thumb_root, path);
 
         let _lock = app_state.thumbs_lock.lock().unwrap();
         match std::fs::remove_dir_all(&thumb_path) {
@@ -830,19 +939,19 @@ async fn fallback_to_dir_delete<P: AsRef<Path> + Copy>(
 }
 
 fn make_thumb_path(thumb_root: &str, path: &str) -> PathBuf {
-    let mut thumb_path = PathBuf::from(thumb_root).join(path.strip_prefix("/").unwrap_or(path));
+    let mut thumb_path = utils::path_join_uri(thumb_root, path);
     thumb_path.add_extension("thumb");
     thumb_path
 }
 
-async fn fallback_to_image_thumb<P: AsRef<Path> + Copy>(
+async fn fallback_to_image_thumb<P: AsRef<Path>>(
     app_state: Arc<AppState>,
     image_path: P,
     path: &str,
 ) -> Response {
     // 生成 thumb path: thumbs_root + path + .png
     let thumb_path = make_thumb_path(&app_state.conf.thumb_root, path);
-    debug!("transfer to thumb \"{}\" ...", thumb_path.display());
+    debug!("get thumb \"{}\" ...", thumb_path.display());
 
     // 锁内判断缓存文件是否存在,存在则返回,否则启动生成 task
     let (tx, rx) = {
@@ -969,4 +1078,154 @@ async fn fallback_to_image_thumb<P: AsRef<Path> + Copy>(
     );
 
     (StatusCode::OK, h, res).into_response()
+}
+
+fn make_converted_video_path(video_root: &str, ext: &str, path: &str) -> PathBuf {
+    let mut converted_video_path = utils::path_join_uri(video_root, path);
+    converted_video_path.add_extension(ext);
+    converted_video_path
+}
+
+async fn fallback_to_video_play<P: AsRef<Path>>(
+    app_state: Arc<AppState>,
+    video_path: P,
+    path: &str,
+    headers: &HeaderMap,
+) -> Response {
+    // 重定向至转码后的视频
+    let converted_video_path = make_converted_video_path(
+        &app_state.conf.video_convert_root,
+        &app_state.conf.video_convert_file_type,
+        path,
+    );
+    if converted_video_path.exists() {
+        debug!("play \"{}\"", converted_video_path.display());
+        fallback_to_file_get(app_state, &converted_video_path, headers).await
+    } else {
+        fallback_to_file_get(app_state, video_path, headers).await
+    }
+}
+
+async fn fallback_to_video_convert<P: AsRef<Path>>(
+    app_state: Arc<AppState>,
+    video_path: P,
+    path: &str,
+) -> Response {
+    let converted_video_path = make_converted_video_path(
+        &app_state.conf.video_convert_root,
+        &app_state.conf.video_convert_file_type,
+        path,
+    );
+    debug!(
+        "convert video to \"{}\" ...",
+        converted_video_path.display()
+    );
+
+    // 输出至临时目录
+    let tmp_video_path = utils::make_unique_tmp_file_name(&app_state.conf.tmp_file_dir);
+
+    // 替换命令模板中的输入/输出文件名
+    let video_convert_cmd = app_state
+        .conf
+        .video_convert_cmd
+        .replace("%INPUT%", video_path.as_ref().to_str().unwrap())
+        .replace("%OUTPUT%", tmp_video_path.to_str().unwrap());
+
+    // 锁外解析转码命令参数
+    let msg = if let Ok(args) = shell_words::split(&video_convert_cmd)
+        && args.len() > 0
+    {
+        // debug!("video convert cmd line: {:?}", args);
+
+        // 锁内判断缓存文件是否存在,存在则返回,否则启动生成 task
+        let mut video_convert_tasks = app_state.video_convert_lock.lock().unwrap();
+
+        if video_convert_tasks.len() >= app_state.conf.video_convert_max_parallel as usize {
+            format!("server is busy, try again later")
+        } else if video_convert_tasks.get(path).is_none() {
+            // 启动一个 task 调用转码命令,并等待命令进程结束后更新状态,保存 cancel_token 用于优雅关闭
+            let task_cancellation_token = CancellationToken::new();
+            let cloned_token = task_cancellation_token.clone();
+            let cloned_app_state = app_state.clone();
+            let cloned_path = path.to_string();
+            let cloned_converted_video_path = converted_video_path.clone();
+
+            // 不管结果如何,任务结束时移除记录
+            let task_handle = tokio::spawn(async move {
+                // 创建转码命令子进程(长耗时)
+                let cmd_process = process::Command::new(&args[0])
+                    .args(&args[1..])
+                    .kill_on_drop(true)
+                    .spawn();
+
+                match cmd_process {
+                    Ok(mut child) => {
+                        // 等待命令结束或者取消
+                        tokio::select! {
+                            _ = cloned_token.cancelled() => {
+                                // 取消,kill 命令进程
+                                let _ = child.kill().await;
+                                let _ = child.wait().await;
+
+                                // 主动 drop 后尝试删除未完成的临时文件(似乎无效果)
+                                drop(child);
+
+                                // windows 平台等待 1 秒, ffmpeg 进程结束才能释放文件
+                                sleep(Duration::from_millis(500)).await;
+
+                                if let Err(e)  = std::fs::remove_file(&tmp_video_path) {
+                                    warn!("failed to remove tmp video file \"{}\": {}", tmp_video_path.display(), e);
+                                } else {
+                                    debug!("tmp video file \"{}\" removed", tmp_video_path.display());
+                                }
+                            },
+                            _ = child.wait() => {
+                                // 命令正常结束时,移动临时文件为转换结果
+                                // 此时转换记录仍在,所以无需锁保护
+                                let mut video_path_dir = cloned_converted_video_path.clone();
+                                video_path_dir.pop();
+                                let _ = std::fs::create_dir_all(&video_path_dir);
+
+                                if let Some(e) = utils::mv(&tmp_video_path, &cloned_converted_video_path).err() {
+                                    warn!(
+                                        "mv \"{}\" to \"{}\" failed: {}",
+                                        tmp_video_path.display(),
+                                        cloned_converted_video_path.display(),
+                                        e
+                                    );
+                                } else {
+                                    // 只有重命名成功时继续,其他情况需要执行删除临时文件
+                                    info!(
+                                        "video convertion complete, saved as \"{}\"",
+                                        cloned_converted_video_path.display()
+                                    );
+                                }
+                            },
+                        }
+                    }
+                    Err(e) => {
+                        error!("failed to start video convertion command: {}", e);
+                    }
+                }
+
+                // 移除记录(退出取消时由于记录已经被清空,会移除失败,但无副作用)
+                let mut video_convert_tasks = cloned_app_state.video_convert_lock.lock().unwrap();
+                if video_convert_tasks.remove(&cloned_path).is_some() {
+                    debug!("video convertion task: \"{}\" removed", cloned_path);
+                }
+            });
+
+            video_convert_tasks.insert(path.to_string(), (task_handle, task_cancellation_token));
+            debug!("video convertion task: \"{}\" inserted", path);
+
+            format!("\"{}\" convertion task started", path)
+        } else {
+            // 转码命令已经在运行
+            format!("\"{}\" convertion task running in progress", path)
+        }
+    } else {
+        format!("invalid video convertion command")
+    };
+
+    return show_message(app_state, StatusCode::OK, None, "Video Convertion", &msg);
 }

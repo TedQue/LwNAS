@@ -143,7 +143,23 @@
                 {% if deletable %}
                     <button data-url="{{ entry.url }}" data-name="{{ entry.name }}" data-confirm="{{ confirm_delete }}" onclick="handleDelete(this)">x</button> | 
                 {% endif %}
-                <span>{{ entry.last_modified }}</span> | <span>{{ entry.size }}</span> | <a href="{{ entry.url }}"> {{ entry.name }}</a><br />
+                <span>{{ entry.last_modified }}</span> | <span>{{ entry.size }}</span> | <a href="{{ entry.url }}"> {{ entry.name }}</a>
+                {% if video_convert_enabled %}
+                    {% if entry.url_video_play %}
+                        | <a href="{{ entry.url_video_play }}">play</a> 
+                    {% else %}
+                        | <span>play</span>
+                    {% endif %}
+                    {% if entry.url_video_convert %}
+                        | <a href="{{ entry.url_video_convert }}">convert</a>
+                    {% else %}
+                        | <span>convert</span>
+                    {% endif %}
+                    {% if entry.url_video_convert_status %}
+                        | pending
+                    {% endif %}
+                {% endif %}
+                <br />
                 </div>
             {% endfor %}
         {% endif %}

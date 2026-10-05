@@ -9,6 +9,9 @@ templates = "templates/**/*.html"
 # 是否允许通过页面关闭程序,否则只能在服务器端 ctrl+c 结束进程
 shutdown_enabled = false
 
+# 临时上传文件存储目录
+tmp_file_dir = 'tmp'
+
 # 是否开启缩略图功能
 thumb_enabled = true
 
@@ -21,8 +24,22 @@ thumb_size = 200
 # 缩略图并发生成任务数量,防止占用大量线程
 thumb_max_parallel = 4
 
-# 临时上传文件存储目录
-tmp_file_dir = 'tmp'
+# 是否开启视频转码功能
+video_convert_enabled = true
+
+# 转码后的视频存储目录
+video_convert_root = 'videos'
+
+# 转码并发生成任务数量,防止占用大量线程
+video_convert_max_parallel = 1
+
+# 转码命令, %INPUT%, %OUTPUT% 分别作为输入输出文件名占位符
+# 直接调用 ffmpeg 转码或者使用 utils/convert_to_mp4.py 工具
+# video_convert_cmd = "ffmpeg -i '%INPUT%' -b:a 192k -crf 18 -c:a aac -c:v libx264 -c:s mov_text -map 0 -movflags +faststart -y -f mp4 '%OUTPUT%'"
+video_convert_cmd = "python utils/convert_video.py -s '%INPUT%' '%OUTPUT%'"
+
+# 转码输出文件类型(扩展名),保持与转码命令输出一致
+video_convert_file_type = 'mp4'
 
 # 上传文件重名时的处理策略
 # overwrite,
