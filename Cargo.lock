@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "lwnas"
-version = "0.6.6"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "async_logger",
@@ -987,6 +987,7 @@ dependencies = [
  "mime_guess",
  "percent-encoding",
  "serde",
+ "shell-words",
  "tera",
  "tokio",
  "tokio-util",
@@ -1591,6 +1592,12 @@ dependencies = [
  "ryu",
  "serde",
 ]
+
+[[package]]
+name = "shell-words"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "shlex"
